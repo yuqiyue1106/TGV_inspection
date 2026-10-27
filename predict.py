@@ -2,6 +2,7 @@
 """Run detection on TGV plate images, with optional tiled inference for full resolution."""
 
 import argparse
+import json
 from pathlib import Path
 
 import cv2
@@ -30,6 +31,18 @@ def parse_args():
     p.add_argument("--overlap", type=float, default=0.2)
     p.add_argument("--out", type=Path, default=code_dir / "runs" / "predict")
     p.add_argument("--no-save-txt", action="store_true")
+    p.add_argument("--labels-out", type=Path, default=None,
+                   help="write flat <stem>.txt predictions here (e.g. the LabelImg label dir)")
+    p.add_argument("--skip-existing", action="store_true",
+                   help="skip images that already have a .txt in --labels-out")
+    p.add_argument("--write-empty", action="store_true",
+                   help="write an empty .txt when nothing is detected, so the review queue is complete")
+    p.add_argument("--manifest", type=Path, default=None, help="write a per-image JSON manifest")
+    p.add_argument("--max-box-w-frac", type=float, default=0.5,
+                   help="drop boxes wider than this fraction of the image (degenerate detections)")
+    p.add_argument("--max-box-area-frac", type=float, default=0.2,
+                   help="drop boxes with larger area fraction of the image")
+    p.add_argument("--no-save-img", action="store_true", help="skip annotated preview images")
     return p.parse_args()
 
 
@@ -141,6 +154,28 @@ def draw(image, boxes, scores, classes, names):
     return canvas
 
 
+def drop_degenerate(boxes, scores, classes, width, height, args):
+    if len(boxes) == 0:
+        return boxes, scores, classes, 0
+    bw = boxes[:, 2] - boxes[:, 0]
+    bh = boxes[:, 3] - boxes[:, 1]
+    keep = (bw <= args.max_box_w_frac * width) & (bh <= args.max_box_w_frac * height) \
+        & (bw * bh <= args.max_box_area_frac * width * height)
+    return boxes[keep], scores[keep], classes[keep], int((~keep).sum())
+
+
+def yolo_lines(boxes, classes, width, height):
+    lines = []
+    for (x1, y1, x2, y2), cls in zip(boxes, classes):
+        x1, x2 = min(max(x1, 0), width), min(max(x2, 0), width)
+        y1, y2 = min(max(y1, 0), height), min(max(y2, 0), height)
+        if x2 - x1 < 1 or y2 - y1 < 1:
+            continue
+        lines.append(f"{int(cls)} {(x1 + x2) / 2 / width:.6f} {(y1 + y2) / 2 / height:.6f} "
+                     f"{(x2 - x1) / width:.6f} {(y2 - y1) / height:.6f}")
+    return lines
+
+
 def main():
     args = parse_args()
     model = YOLO(str(args.model))
@@ -152,30 +187,60 @@ def main():
 
     out_dir = args.out / source.stem
     out_dir.mkdir(parents=True, exist_ok=True)
+    if args.labels_out:
+        args.labels_out.mkdir(parents=True, exist_ok=True)
 
+    manifest, skipped, processed = {}, 0, 0
     for path in images:
+        target = args.labels_out / f"{path.stem}.txt" if args.labels_out else out_dir / f"{path.stem}.txt"
+        if args.labels_out and args.skip_existing and target.exists():
+            skipped += 1
+            continue
+
         image = read_image(path)
+        height, width = image.shape[:2]
         if args.tiled:
             boxes, scores, classes = tiled_infer(model, image, args)
         else:
             boxes, scores, classes = full_infer(model, image, args)
+        boxes, scores, classes, dropped = drop_degenerate(boxes, scores, classes, width, height, args)
 
-        height, width = image.shape[:2]
-        annotated = draw(image, boxes, scores, classes, names)
-        cv2.imwrite(str(out_dir / f"{path.stem}_pred.jpg"), annotated,
-                    [cv2.IMWRITE_JPEG_QUALITY, 92])
-        if not args.no_save_txt:
-            lines = []
-            for (x1, y1, x2, y2), score, cls in zip(boxes, scores, classes):
-                xc, yc = (x1 + x2) / 2 / width, (y1 + y2) / 2 / height
-                bw, bh = (x2 - x1) / width, (y2 - y1) / height
-                lines.append(f"{int(cls)} {xc:.6f} {yc:.6f} {bw:.6f} {bh:.6f}")
-            (out_dir / f"{path.stem}.txt").write_text("\n".join(lines))
+        if not args.no_save_img:
+            annotated = draw(image, boxes, scores, classes, names)
+            cv2.imwrite(str(out_dir / f"{path.stem}_pred.jpg"), annotated,
+                        [cv2.IMWRITE_JPEG_QUALITY, 92])
+
+        lines = yolo_lines(boxes, classes, width, height)
+        if (args.labels_out or not args.no_save_txt) and (lines or args.write_empty):
+            target.write_text("\n".join(lines) + ("\n" if lines else ""))
 
         counts = {names[int(c)]: int((classes == c).sum()) for c in np.unique(classes)}
-        print(f"{path.name}: {counts if counts else 'no detection'}")
+        manifest[path.stem] = {
+            "boxes": len(lines),
+            "per_class": counts,
+            "dropped_degenerate": dropped,
+            "max_conf": round(float(scores.max()), 4) if len(scores) else 0.0,
+            "status": "detected" if lines else "no_detection",
+            "label": str(target),
+        }
+        processed += 1
+        if args.labels_out and processed % 100 == 0:
+            print(f"[{processed}/{len(images) - skipped}] {path.stem}: {counts or 'no detection'}", flush=True)
+        elif not args.labels_out:
+            print(f"{path.name}: {counts if counts else 'no detection'}")
 
-    print(f"results -> {out_dir}")
+    if args.manifest:
+        args.manifest.parent.mkdir(parents=True, exist_ok=True)
+        args.manifest.write_text(json.dumps({
+            "model": str(args.model), "source": str(source), "imgsz": args.imgsz,
+            "conf": args.conf, "tiled": args.tiled,
+            "images": processed, "skipped_existing": skipped, "entries": manifest,
+        }, indent=2))
+
+    empty = sum(1 for e in manifest.values() if e["status"] == "no_detection")
+    print(f"processed {processed}, skipped {skipped} (already labelled), "
+          f"{empty} with no detection")
+    print(f"results -> {args.labels_out or out_dir}")
 
 
 if __name__ == "__main__":
