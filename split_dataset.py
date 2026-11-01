@@ -20,6 +20,8 @@ def parse_args():
     p.add_argument("--labels-dir", type=Path, default=root / "labels")
     p.add_argument("--out-dir", type=Path, default=root / "dataset")
     p.add_argument("--val-frac", type=float, default=0.2)
+    p.add_argument("--test-frac", type=float, default=0.0,
+                   help="held-out test split; never used for training or model selection")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--force", action="store_true", help="rebuild an existing dataset dir")
     return p.parse_args()
@@ -53,7 +55,7 @@ def ensure_clean(out_dir, force):
             if not force:
                 raise SystemExit(f"{d} already exists; rerun with --force to rebuild")
             shutil.rmtree(d)
-    for split in ("train", "val"):
+    for split in ("train", "val", "test"):
         (image_root / split).mkdir(parents=True, exist_ok=True)
         (label_root / split).mkdir(parents=True, exist_ok=True)
 
@@ -80,32 +82,42 @@ def main():
         raise SystemExit(f"class ids {missing} have no entry in {args.labels_dir / 'classes.txt'}")
     names = names[: max(class_ids) + 1] if class_ids else names
 
-    # stratify by presence of every non-zero class so val keeps rare defects
-    def stratum(boxes):
+    # stratify by plate group *and* presence of every non-zero class, so each split
+    # sees the same aperture mix and the rare class stays represented everywhere
+    def stratum(sample):
+        img, _, boxes = sample
+        group = img.stem.rsplit("_", 1)[0]
         present = {c for c, *_ in boxes}
-        return tuple(c in present for c in range(1, len(names)))
+        return (group,) + tuple(c in present for c in range(1, len(names)))
 
     groups = {}
     for sample in samples:
-        groups.setdefault(stratum(sample[2]), []).append(sample)
+        groups.setdefault(stratum(sample), []).append(sample)
+
+    def take(group, frac):
+        n = round(len(group) * frac)
+        if len(group) > 1:
+            n = min(max(n, 1), len(group) - 1)
+        else:
+            n = 0
+        return n
 
     rng = random.Random(args.seed)
-    val, train = [], []
+    test, val, train = [], [], []
     for key in sorted(groups, reverse=True):
         group = groups[key]
         rng.shuffle(group)
-        n_val = round(len(group) * args.val_frac)
-        if len(group) > 1:
-            n_val = min(max(n_val, 1), len(group) - 1)
-        else:
-            n_val = 0
-        val.extend(group[:n_val])
-        train.extend(group[n_val:])
-    rng.shuffle(train)
-    rng.shuffle(val)
+        n_test = take(group, args.test_frac) if args.test_frac > 0 else 0
+        test.extend(group[:n_test])
+        rest = group[n_test:]
+        n_val = take(rest, args.val_frac / (1 - args.test_frac)) if args.val_frac > 0 else 0
+        val.extend(rest[:n_val])
+        train.extend(rest[n_val:])
+    for items in (train, val, test):
+        rng.shuffle(items)
 
     ensure_clean(args.out_dir, args.force)
-    for split, items in (("train", train), ("val", val)):
+    for split, items in (("train", train), ("val", val), ("test", test)):
         for img, label, _ in items:
             link(img, args.out_dir / "images" / split / img.name)
             link(label, args.out_dir / "labels" / split / label.name)
@@ -114,6 +126,7 @@ def main():
         "path": str(args.out_dir.resolve()),
         "train": "images/train",
         "val": "images/val",
+        "test": "images/test",
         "names": {i: n for i, n in enumerate(names)},
     }
     import yaml
@@ -124,19 +137,25 @@ def main():
     manifest = {
         "seed": args.seed,
         "val_frac": args.val_frac,
+        "test_frac": args.test_frac,
         "train": [p.name for p, _, _ in train],
         "val": [p.name for p, _, _ in val],
+        "test": [p.name for p, _, _ in test],
     }
     (args.out_dir / "split.json").write_text(json.dumps(manifest, indent=2))
 
     def summary(items):
         boxes = Counter(c for _, _, b in items for c, *_ in b)
         no_scratch = sum(1 for _, _, b in items if not any(c == 1 for c, *_ in b))
-        return f"{len(items):4d} images, {dict(sorted(boxes.items()))} boxes, {no_scratch} without scratch"
+        groups = Counter(p.stem.rsplit("_", 1)[0] for p, _, _ in items)
+        return (f"{len(items):4d} images, {dict(sorted(boxes.items()))} boxes, "
+                f"{no_scratch} without scratch, groups={dict(sorted(groups.items()))}")
 
     print(f"dataset -> {args.out_dir}")
     print("train:", summary(train))
     print("val:  ", summary(val))
+    if test:
+        print("test: ", summary(test))
     print("classes:", {i: n for i, n in enumerate(names)})
 
 

@@ -22,6 +22,11 @@ def parse_args():
     p.add_argument("--workers", type=int, default=0, help="0 is the safe choice on macOS")
     p.add_argument("--cache", default="ram", choices=["ram", "disk", "false"])
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--optimizer", default="auto",
+                   help="'auto' ignores --lr0; pass AdamW/SGD to honour it when fine-tuning")
+    p.add_argument("--lr0", type=float, default=0.01, help="initial LR (only used when --optimizer != auto)")
+    p.add_argument("--warmup-epochs", type=float, default=3.0)
+    p.add_argument("--close-mosaic", type=int, default=10)
     p.add_argument("--project", type=Path, default=code_dir / "runs")
     p.add_argument("--name", default="tgv_v8s_1024")
     p.add_argument("--resume", action="store_true")
@@ -59,7 +64,10 @@ def main():
         flipud=0.5,
         scale=0.5,
         mosaic=1.0,
-        close_mosaic=10,
+        close_mosaic=args.close_mosaic,
+        optimizer=args.optimizer,
+        lr0=args.lr0,
+        warmup_epochs=args.warmup_epochs,
         resume=args.resume,
     )
     best = args.project / args.name / "weights" / "best.pt"
