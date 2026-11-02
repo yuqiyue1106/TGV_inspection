@@ -27,6 +27,8 @@ def parse_args():
     p.add_argument("--lr0", type=float, default=0.01, help="initial LR (only used when --optimizer != auto)")
     p.add_argument("--warmup-epochs", type=float, default=3.0)
     p.add_argument("--close-mosaic", type=int, default=10)
+    p.add_argument("--tensorboard", action="store_true",
+                   help="write TensorBoard events into the run directory")
     p.add_argument("--project", type=Path, default=code_dir / "runs")
     p.add_argument("--name", default="tgv_v8s_1024")
     p.add_argument("--resume", action="store_true")
@@ -42,6 +44,10 @@ def main():
         args.name = args.name + "_smoke"
 
     model = YOLO(args.model)
+    if args.tensorboard:
+        from ultralytics.utils import SETTINGS
+        previous = SETTINGS["tensorboard"]
+        SETTINGS.update({"tensorboard": True})
     model.train(
         data=str(args.data),
         imgsz=args.imgsz,
@@ -70,6 +76,8 @@ def main():
         warmup_epochs=args.warmup_epochs,
         resume=args.resume,
     )
+    if args.tensorboard:
+        SETTINGS.update({"tensorboard": previous})
     best = args.project / args.name / "weights" / "best.pt"
     print(f"\nbest checkpoint: {best}")
 

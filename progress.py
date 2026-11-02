@@ -4,6 +4,7 @@
 import argparse
 import csv
 import re
+import statistics
 from pathlib import Path
 
 import yaml
@@ -15,10 +16,31 @@ ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 def parse_args():
     code_dir = Path(__file__).resolve().parent
     p = argparse.ArgumentParser()
-    p.add_argument("--run", type=Path, default=code_dir / "runs" / "prelabel_v8s_1024")
-    p.add_argument("--log", type=Path, default=code_dir / "runs" / "train_prelabel.log")
+    p.add_argument("--run", type=Path, default=None,
+                   help="run directory; defaults to the most recently updated one")
+    p.add_argument("--log", type=Path, default=None,
+                   help="training log; defaults to runs/train_<run>.log when present")
     p.add_argument("--last", type=int, default=10, help="how many recent epochs to print")
     return p.parse_args()
+
+
+def newest_run(code_dir):
+    runs = [p.parent for p in (code_dir / "runs").glob("*/results.csv")]
+    if not runs:
+        raise SystemExit(f"no results.csv under {code_dir / 'runs'}")
+    return max(runs, key=lambda d: (d / "results.csv").stat().st_mtime)
+
+
+def resolve_run(code_dir, value):
+    """Accept a bare run name ('official_v8s_1024'), a relative path or an absolute path."""
+    if value is None:
+        return newest_run(code_dir)
+    if value.is_absolute():
+        return value
+    for candidate in (Path.cwd() / value, code_dir / "runs" / value):
+        if candidate.is_dir():
+            return candidate
+    return code_dir / "runs" / value  # let the caller report a path that shows the intent
 
 
 def live_status(log_path):
@@ -46,6 +68,11 @@ def training_finished(log_path):
 
 def main():
     args = parse_args()
+    code_dir = Path(__file__).resolve().parent
+    args.run = resolve_run(code_dir, args.run)
+    if args.log is None:
+        candidate = args.run.parent / f"train_{args.run.name}.log"
+        args.log = candidate if candidate.exists() else None
     csv_path = args.run / "results.csv"
     if not csv_path.exists():
         raise SystemExit(f"{csv_path} not found (training not started yet)")
@@ -62,17 +89,28 @@ def main():
     key = lambda r, name: float(r[name])
     done = len(rows)
     last = rows[-1]
-    secs = key(last, "time")
-    per_epoch = secs / done
+    times = [key(r, "time") for r in rows]
+
+    # cumulative time restarts after a resume, so sum the monotonic segments
+    elapsed, seg_start, prev = 0.0, 0.0, None
+    for t in times:
+        if prev is not None and t < prev:
+            elapsed += prev - seg_start
+            seg_start = 0.0
+        prev = t
+    elapsed += (prev or 0.0) - seg_start
+
+    deltas = [b - a for a, b in zip(times, times[1:]) if b > a]
+    per_epoch = statistics.median(deltas[-10:]) if deltas else times[0]
     eta_min = per_epoch * (total - done) / 60
 
     finished = done >= total or training_finished(args.log)
     if finished:
         reason = "早停" if done < total else "跑满"
-        print(f"{args.run.name}: 训练已结束（{reason}于 {done}/{total} epoch，用时 {secs / 3600:.2f}h）")
+        print(f"{args.run.name}: 训练已结束（{reason}于 {done}/{total} epoch，用时 {elapsed / 3600:.2f}h）")
     else:
-        print(f"{args.run.name}: 已完成 {done}/{total} epoch ({done / total * 100:5.1f}%)  "
-              f"elapsed {secs / 3600:5.2f}h  {per_epoch / 60:.1f} min/epoch  "
+        print(f"{args.run.name}: 训练进行中 —— 第 {done}/{total} 个 epoch 已完成 ({done / total * 100:5.1f}%)  "
+              f"elapsed {elapsed / 3600:5.2f}h  {per_epoch / 60:.1f} min/epoch  "
               f"ETA {eta_min / 60:5.2f}h")
         live = live_status(args.log)
         if live and live["epoch"] > done:
