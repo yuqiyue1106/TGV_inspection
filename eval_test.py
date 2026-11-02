@@ -3,11 +3,13 @@
 
 import argparse
 import csv
+import functools
 import json
 from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
+import ultralytics.utils.nms as _nms
 import yaml
 from ultralytics import YOLO
 
@@ -71,10 +73,37 @@ def score(preds, gts, names, match_iou, conf_thr=0.0):
     return out
 
 
+def relax_nms_time_limit():
+    """Disable ultralytics' per-call NMS deadline (utils/nms.py: time_limit = 2 + 0.05*bs).
+
+    When it trips, NMS breaks out of the batch loop and every remaining image silently gets
+    zero boxes, which wrecks the per-image breakdown on a 176-image call.
+    """
+    original = _nms.non_max_suppression
+    if getattr(original, "_tgv_no_deadline", False):
+        return
+    @functools.wraps(original)
+    def wrapper(*args, **kwargs):
+        kwargs["max_time_img"] = 3600.0
+        return original(*args, **kwargs)
+    wrapper._tgv_no_deadline = True
+    _nms.non_max_suppression = wrapper
+
+
+def predict_all(model, images, args, conf, chunk=8):
+    results = []
+    for start in range(0, len(images), chunk):
+        part = images[start:start + chunk]
+        results.extend(model.predict(part, imgsz=args.imgsz, batch=chunk, device=args.device,
+                                     conf=conf, iou=args.iou, verbose=False, max_det=300))
+    return results
+
+
 def main():
     args = parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
     images, names = split_images(args.data, args.split)
+    relax_nms_time_limit()
     model = YOLO(str(args.model))
 
     print(f"== {args.split}: {len(images)} images, model={args.model.name} ==")
@@ -96,8 +125,7 @@ def main():
         }
     print(f"official mAP50={official['mAP50']:.4f}  mAP50-95={official['mAP50-95']:.4f}")
 
-    results = model.predict(images, imgsz=args.imgsz, batch=4, device=args.device,
-                            conf=args.conf_min, iou=args.iou, verbose=False, max_det=300)
+    results = predict_all(model, images, args, args.conf_min)
     preds, gts = [], []
     for image, result in zip(images, results):
         boxes = result.boxes
@@ -109,6 +137,8 @@ def main():
                           boxes.cls.cpu().numpy().astype(np.int64)))
         height, width = result.orig_shape
         gts.append(load_gt(image, width, height))
+    total_pred = sum(len(p[0]) for p in preds)
+    print(f"predict: {total_pred} boxes on {len(images)} images ({total_pred / max(len(images), 1):.1f}/img)")
 
     rows = []
 
