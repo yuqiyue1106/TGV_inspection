@@ -1,4 +1,8 @@
+__pycache__/
+.venv/
 runs/
 weights/
 *.jpg
 *.txt
+!requirements.txt
+.DS_Store
