@@ -8,6 +8,133 @@
 平台差异全部收敛到 `device.py` 和 `requirements-*.txt` 两处，脚本本身不带任何
 `if windows:` 之类的分支。
 
+**第一次上手请直接看 §0。** 装环境见 §2（Windows）或 §3（Mac），拷数据和重建切分见 §4。
+
+---
+
+## 0. 快速上手：训练 → 验证 → 报告（新手路线）
+
+照着本节从上到下抄命令即可，不需要先读懂其余章节。全部命令在 **cmd**（不是 PowerShell）
+里执行；每开一个新窗口都要先做 §0.1 的两行。
+
+### 0.1 进入代码目录并激活环境
+
+```bat
+cd /d "E:\TGV inspection detection\Exp_Data\TGV_yolo_Dataset\code"
+.venv\Scripts\activate
+```
+
+激活成功的标志：命令行提示符前面出现 `(.venv)`。若这一步就失败，说明环境还没装好，
+先回到 §2。
+
+### 0.2 第一步：冒烟测试（约 3 分钟，先确认整条链路是通的）
+
+```bat
+python train.py --name gpu_smoke --smoke --batch 4 --workers 8 --cache false
+```
+
+- `--smoke` 会把 epoch 强制压到 3，并**自动在名字后追加 `_smoke`**，所以产物在
+  **`runs\gpu_smoke_smoke\`**（不是 `runs\gpu_smoke`）。
+- 判定成功：屏幕最后打印 `best checkpoint: ...\runs\gpu_smoke_smoke\weights\best.pt`，
+  且 `runs\gpu_smoke_smoke\results.csv` 有 3 行。
+- 这一步失败就别开正式训练：常见原因是没装成 CUDA 版 torch（回 §2 用
+  `python -c "import torch; print(torch.cuda.is_available())"` 检查）或 `dataset\data.yaml`
+  路径过期（回 §4 跑 `python prepare_pc.py`）。
+
+### 0.3 第二步：正式训练（100 epoch）
+
+```bat
+python train.py --name gpu_v8s_1024 --epochs 100 --batch 4 --imgsz 1024 --workers 8 --cache false --patience 30 --tensorboard
+```
+
+用新名字 `gpu_v8s_1024` 是为了**不覆盖** Mac 上已有的 `official_v8s_1024`，两台机器的
+结果才能并排比较。
+
+本机（Windows + NVIDIA）实测参数取舍：
+
+| 设置 | 实测结果 | 建议 |
+|---|---|---|
+| `--batch 4` | 5.2 it/s，115 s/epoch，显存峰值 4094/6144 MiB，100 epoch 约 3.2 h（Mac 同配置约 12.3 h） | **默认就用它** |
+| `--batch 8` | 只比 batch 4 快约 8%，显存峰值 5739/6144 MiB | 除非先关掉微信/浏览器等桌面程序，否则容易 OOM，不建议 |
+| `--cache ram` | 数据集约 20 GB，64 GB 内存放得下，但瓶颈是 70 W 的 GPU，速度没有提升 | 可保持 `false` |
+| `--patience 30` | mAP 连续 30 epoch 不涨就早停 | 避免跑满 100 epoch 浪费时间 |
+| `--tensorboard` | 事件文件写到 run 目录 | 需要看曲线时另开窗口 `tensorboard --logdir runs` |
+
+产物：`runs\gpu_v8s_1024\weights\best.pt`、`last.pt`、`results.csv`、曲线图和
+TensorBoard 事件。
+
+训练中途断了、或想补 epoch，用 `last.pt` 续训（不会重头开始）：
+
+```bat
+python train.py --model runs\gpu_v8s_1024\weights\last.pt --name gpu_v8s_1024 --resume
+```
+
+### 0.4 第三步：验证（val 阈值扫描 + test 留出集）
+
+先在 val 集上扫置信度阈值，拿到每一类推荐的 `conf`：
+
+```bat
+python evaluate.py --model runs\gpu_v8s_1024\weights\best.pt --device auto --out runs\eval_gpu_v8s_1024
+```
+
+产物 `runs\eval_gpu_v8s_1024\threshold_report.csv` 与 `summary.json`，后者里的
+`recommended` 给出「recall ≥ 0.95 前提下 precision 最高」的阈值，产线用哪个 `conf` 看这里。
+
+再在留出的 test 集上按口径出明细（人工标注 / 机器预标分开，另按孔径分组）：
+
+```bat
+python eval_test.py --model runs\gpu_v8s_1024\weights\best.pt --out runs\eval_test_gpu_v8s_1024
+```
+
+产物 `runs\eval_test_gpu_v8s_1024\summary.json`（含官方 mAP50 / mAP50-95）、
+`breakdown.csv`、`sweep.csv`。
+
+### 0.5 第四步：汇总成 Markdown 报告
+
+```bat
+python report.py --run runs\gpu_v8s_1024 --eval runs\eval_test_gpu_v8s_1024\summary.json
+```
+
+产物在 `runs\gpu_v8s_1024\report\`：
+
+| 文件 | 内容 |
+|---|---|
+| `report.md` | 结论、test 集官方指标与逐类 P/R、按孔径/标签来源分组、置信度扫描、局限说明 |
+| `curves_metrics.png` | mAP50-95 / mAP50 / P / R 随 epoch 变化，标出最佳 epoch |
+| `curves_losses.png` | train/val 三类损失与学习率，标出 mosaic 关闭区间 |
+| `test_breakdown.png` | test 集 P/R、按孔径与标签来源的 recall |
+
+两个前提：`--run` 目录里必须有非空的 `results.csv`（至少训练完 1 个 epoch）；
+`--eval` 指向的 `summary.json` 不存在时报告仍会生成，但会缺 §2 和 test 图。
+
+和 Mac 基线对比时，把 `--run` / `--eval` 换成基线路径即可：
+
+```bat
+python report.py --run runs\official_v8s_1024 --eval runs\eval_test_official\summary.json
+```
+
+### 0.6 第五步（可选）：跑图 / 预标注
+
+```bat
+python predict.py --model runs\gpu_v8s_1024\weights\best.pt --source ..\images --tiled
+```
+
+全分辨率图必须带 `--tiled`（默认 1024 切片、20% 重叠）。带标注的预览图和每图 `.txt`
+写到 `runs\predict\`；要给 LabelImg 预标注，加 `--labels-out ..\labels --skip-existing`。
+
+### 0.7 验收清单
+
+| 检查项 | 期望结果 |
+|---|---|
+| 冒烟测试 | `runs\gpu_smoke_smoke\results.csv` 有 3 行，`weights\best.pt` 存在 |
+| 正式训练 | 跑满 100 epoch 或被 `patience` 早停，`runs\gpu_v8s_1024\weights\best.pt` 存在 |
+| val 扫描 | `runs\eval_gpu_v8s_1024\summary.json` 的 `recommended` 每类都有 `threshold` |
+| test 评估 | `runs\eval_test_gpu_v8s_1024\summary.json` 有 `official` 与 `breakdown` |
+| 总结报告 | `runs\gpu_v8s_1024\report\report.md` 五节齐全，三张 PNG 都能打开 |
+
+单机走完全流程约 3.5 小时（0.1 h 冒烟 + 3.2 h 训练 + 约 0.2 h 两次评估）。
+训练和评估**不要同时跑**：batch 4 已占用约 2/3 显存，叠一个进程基本必然 OOM。
+
 ---
 
 ## 1. 该文件在两台机器上的对应关系
