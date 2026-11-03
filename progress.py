@@ -104,7 +104,9 @@ def report(args):
     per_epoch = statistics.median(deltas[-10:]) if deltas else times[0]
     eta_min = per_epoch * (total - done) / 60
 
-    finished = done >= total or training_finished(args.log)
+    # A log left behind by a previous run must not supply live progress for this one.
+    log_fresh = args.log.exists() and args.log.stat().st_mtime >= csv_path.stat().st_mtime
+    finished = done >= total or (log_fresh and training_finished(args.log))
     if finished:
         reason = "早停" if done < total else "跑满"
         print(f"{args.run.name}: 训练已结束（{reason}于 {done}/{total} epoch，用时 {elapsed / 3600:.2f}h）")
@@ -112,7 +114,7 @@ def report(args):
         print(f"{args.run.name}: 训练进行中 —— 第 {done}/{total} 个 epoch 已完成 ({done / total * 100:5.1f}%)  "
               f"elapsed {elapsed / 3600:5.2f}h  {per_epoch / 60:.1f} min/epoch  "
               f"ETA {eta_min / 60:5.2f}h")
-        live = live_status(args.log)
+        live = live_status(args.log) if log_fresh else None
         if live and live["epoch"] > done:
             print(f"正在训练 epoch {live['epoch']}/{live['total']}: "
                   f"batch {live['batch']}/{live['batches']} ({live['pct']}%), "
