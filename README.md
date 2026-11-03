@@ -53,8 +53,10 @@ GTX 10 系或 V100，把 `requirements-cuda.txt` 里的 `cu130` 全部改成 `cu
 ```bash
 git clone <repo> code && cd code
 
-python3.12 -m venv .venv && source .venv/bin/activate
-pip install -r requirements-mac.txt
+# 用 uv 建环境：与 §2 Windows 同一套工具链，也绕开系统 python3.12 可能不在 PATH 的问题
+uv venv --python 3.12 .venv
+source .venv/bin/activate
+uv pip install -r requirements-mac.txt
 
 # 只想要 CPU 就把 mps 换成 cpu，依赖完全一样
 python -c "import torch; print(torch.__version__, torch.backends.mps.is_available())"
@@ -65,10 +67,14 @@ python prepare_pc.py
 python train.py --device mps --smoke
 ```
 
-注意两点：
+注意三点：
 
 - Mac 上 **不要传 `--device 0`**，数字索引的语义就是 CUDA 设备号，会直接失败。用
   `auto` / `mps` / `cpu`。
+- `uv venv` 默认**不往环境里装 pip**：激活后 `which pip` 会是 not found，`which pip3`
+  会命中 `/usr/bin/pip3`（系统 Python 3.9）。装依赖请一律用 `uv pip install ...`，
+  **不要退回 `pip`/`pip3`**，否则会用到系统 3.9，触发 `absl-py==2.5.1` 这类精确 pin
+  的“找不到版本”报错。
 - `device.py` 已经在 import torch 之前设置 `PYTORCH_ENABLE_MPS_FALLBACK=1`，所以不需要
   再手动 export 环境变量。这也是所有脚本都必须把 `import device` 写在
   `import ultralytics` / `import torch` 之前的原因。

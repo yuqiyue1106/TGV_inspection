@@ -4,8 +4,10 @@
 # backend, so there is no extra index and no +cuXXX local version to pin here. That
 # difference is the whole reason requirements.txt splits in two.
 #
-#   python3.12 -m venv .venv && source .venv/bin/activate
-#   pip install -r requirements-mac.txt
+#   uv venv --python 3.12 .venv && source .venv/bin/activate
+#   uv pip install -r requirements-mac.txt
+#
+# uv venv 默认不装 pip：激活后用 `uv pip`，不要用 `pip`/`pip3`（后者命中系统 3.9）。
 #
 # Delete the index line below if you are not on a mainland-China network.
 --index-url https://mirrors.aliyun.com/pypi/simple/
