@@ -100,9 +100,13 @@ def main():
             print(f"removed stale {cache.name}")
 
     try:
+        # device before torch: it sets PYTORCH_ENABLE_MPS_FALLBACK for the MPS case.
+        import device as dev
         import torch
-        gpu = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu only"
-        print(f"\ntorch {torch.__version__}  cuda={torch.cuda.is_available()}  {gpu}")
+        print(f"\ntorch {torch.__version__}  cuda={torch.cuda.is_available()} "
+              f"mps={dev.mps_available()}")
+        print(f"auto device -> {dev.describe(dev.resolve('auto'))}")
+        print(f"preset        -> {dev.preset(dev.resolve('auto'))}")
     except ImportError:
         print("\ntorch not installed yet")
 

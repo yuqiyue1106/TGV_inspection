@@ -1,8 +1,46 @@
+# --- python ---
 __pycache__/
+*.py[cod]
 .venv/
+venv/
+env/
+.ipynb_checkpoints/
+
+# --- per-machine run artefacts: curves, logs and checkpoints are not portable ---
 runs/
+*.log
+
+# --- weights travel as GitHub Release assets, never through the tree ---
 weights/
+*.pt
+*.pth
+*.onnx
+*.engine
+*.mlpackage
+
+# --- the dataset sits outside this directory and is rebuilt on each machine
+#     by prepare_pc.py (its split entries are hard links, meaningless in git) ---
+dataset/
+images/
+labels/
+*.cache
+
+# --- images and annotation files ---
 *.jpg
+*.jpeg
+*.png
+*.bmp
+*.tif
+*.tiff
 *.txt
-!requirements.txt
+# The rule above would silently swallow every new dependency pin, so whitelist them
+# with a glob rather than the old single `!requirements.txt`.
+!requirements*.txt
+
+# --- OS / editor cruft ---
 .DS_Store
+._*
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/

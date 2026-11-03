@@ -1,0 +1,33 @@
+# Line endings are decided here, not by each machine's core.autocrlf.
+# The scripts all carry a `#!/usr/bin/env python3` shebang, so a CRLF checkout on the
+# Mac would break direct execution with "bad interpreter: ... python3^M".
+* text=auto eol=lf
+
+*.py    text eol=lf
+*.md    text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+*.json  text eol=lf
+*.toml  text eol=lf
+*.cfg   text eol=lf
+*.txt   text eol=lf
+*.sh    text eol=lf
+# PowerShell and cmd need CRLF to stay friendly to Notepad and to here-strings.
+*.ps1   text eol=crlf
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+# Never let git touch a binary byte: an autocrlf pass corrupts checkpoints.
+*.pt        binary
+*.pth       binary
+*.onnx      binary
+*.engine    binary
+*.mlpackage binary
+*.tflite    binary
+*.jpg       binary
+*.jpeg      binary
+*.png       binary
+*.bmp       binary
+*.tif       binary
+*.tiff      binary
+*.events.out.tfevents.* binary

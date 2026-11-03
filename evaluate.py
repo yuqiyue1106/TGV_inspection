@@ -6,11 +6,12 @@ import csv
 import json
 from pathlib import Path
 
+# device comes first on purpose: ultralytics imports torch, and the MPS fallback switch
+# inside device.py only has any effect if it is set before that happens.
+import device as dev
 import numpy as np
 import yaml
 from ultralytics import YOLO
-
-import device as dev
 
 IMG_EXTS = {".bmp", ".png", ".jpg", ".jpeg", ".tif", ".tiff"}
 
@@ -22,8 +23,9 @@ def parse_args():
     p.add_argument("--model", type=Path, default=root / "code" / "runs" / "tgv_v8s_1024" / "weights" / "best.pt")
     p.add_argument("--data", type=Path, default=root / "dataset" / "data.yaml")
     p.add_argument("--imgsz", type=int, default=1024)
-    p.add_argument("--batch", type=int, default=4)
-    p.add_argument("--device", default="auto", help="auto / 0 (CUDA) / cpu / mps")
+    p.add_argument("--batch", type=int, default=None,
+                   help="per-backend preset when unset: 4 on CUDA, 2 on MPS and CPU")
+    p.add_argument("--device", default="auto", help="auto / 0 (CUDA) / mps / cpu")
     p.add_argument("--conf-min", type=float, default=0.01, help="lowest confidence kept for the sweep")
     p.add_argument("--iou", type=float, default=0.6, help="NMS IoU")
     p.add_argument("--match-iou", type=float, default=0.5, help="IoU used to call a prediction a TP")
@@ -115,7 +117,9 @@ def match(pred_boxes, pred_conf, gt_boxes, match_iou):
 def main():
     args = parse_args()
     args.device = dev.resolve(args.device)
-    print(f"device: {dev.describe(args.device)}")
+    dev.announce(args.device)
+    if args.batch is None:
+        args.batch = dev.preset(args.device)["batch"]
     args.out.mkdir(parents=True, exist_ok=True)
     images, names = load_split(args.data)
 

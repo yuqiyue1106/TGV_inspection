@@ -1,0 +1,19 @@
+# macOS -- Apple Silicon (M4) or Intel.
+#
+# The PyPI macosx_arm64 wheel of torch already carries the Metal Performance Shaders
+# backend, so there is no extra index and no +cuXXX local version to pin here. That
+# difference is the whole reason requirements.txt splits in two.
+#
+#   python3.12 -m venv .venv && source .venv/bin/activate
+#   pip install -r requirements-mac.txt
+#
+# Delete the index line below if you are not on a mainland-China network.
+--index-url https://mirrors.aliyun.com/pypi/simple/
+
+-r requirements.txt
+
+# torch >= 2.4 is the floor for a usable MPS backend; anything older leaves operators
+# unimplemented and the run falls back to CPU constantly. Both backends this file
+# supports are selected at run time with --device mps / --device cpu.
+torch>=2.4
+torchvision>=0.19

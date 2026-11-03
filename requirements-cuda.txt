@@ -1,0 +1,26 @@
+# Windows 11 / Linux + NVIDIA GPU.
+#
+# PyPI only serves the CPU build of torch on Windows, so the CUDA wheel index has to be
+# declared here; that is the single reason this file exists separately from
+# requirements.txt. The two index lines below are read by pip itself, so no extra
+# command-line flags are needed:
+#
+#   pip install -r requirements-cuda.txt
+#
+# If you use uv instead, its default resolution strategy ignores the extra index unless
+# told otherwise, so pass the flag explicitly:
+#
+#   uv pip install --index-strategy unsafe-best-match -r requirements-cuda.txt
+#
+# cu130 requires CUDA 13, which dropped Maxwell / Pascal / Volta (compute capability
+# below 7.5). GTX 10-series or a Tesla V100 need cu126 instead -- change the tag on the
+# index URL and on the two pins below.
+--index-url https://mirrors.aliyun.com/pypi/simple/
+--extra-index-url https://download.pytorch.org/whl/cu130
+
+-r requirements.txt
+
+# NVML bindings, only meaningful on an NVIDIA host.
+nvidia-ml-py==13.615.71
+torch==2.14.1+cu130
+torchvision==0.29.1+cu130

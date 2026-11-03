@@ -8,14 +8,15 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
+# device comes first on purpose: ultralytics imports torch, and the MPS fallback switch
+# inside device.py only has any effect if it is set before that happens.
+import device as dev
 import numpy as np
 import ultralytics.utils.nms as _nms
 import yaml
 from ultralytics import YOLO
 
 from evaluate import IMG_EXTS, load_gt, match
-
-import device as dev
 
 CODE = Path(__file__).resolve().parent
 ROOT = CODE.parent
@@ -31,7 +32,9 @@ def parse_args():
     p.add_argument("--conf-min", type=float, default=0.05, help="lowest confidence kept for the sweep")
     p.add_argument("--iou", type=float, default=0.6, help="NMS IoU")
     p.add_argument("--match-iou", type=float, default=0.5)
-    p.add_argument("--device", default="auto", help="auto / 0 (CUDA) / cpu / mps")
+    p.add_argument("--batch", type=int, default=None,
+                   help="val batch and predict chunk; per-backend preset when unset")
+    p.add_argument("--device", default="auto", help="auto / 0 (CUDA) / mps / cpu")
     p.add_argument("--out", type=Path, default=CODE / "runs" / "eval_test_official")
     p.add_argument("--limit", type=int, default=0, help="debug: only score the first N images")
     return p.parse_args()
@@ -92,7 +95,8 @@ def relax_nms_time_limit():
     _nms.non_max_suppression = wrapper
 
 
-def predict_all(model, images, args, conf, chunk=8):
+def predict_all(model, images, args, conf, chunk=None):
+    chunk = chunk or args.batch
     results = []
     for start in range(0, len(images), chunk):
         part = images[start:start + chunk]
@@ -104,14 +108,16 @@ def predict_all(model, images, args, conf, chunk=8):
 def main():
     args = parse_args()
     args.device = dev.resolve(args.device)
-    print(f"device: {dev.describe(args.device)}")
+    dev.announce(args.device)
+    if args.batch is None:
+        args.batch = dev.preset(args.device)["batch"]
     args.out.mkdir(parents=True, exist_ok=True)
     images, names = split_images(args.data, args.split)
     relax_nms_time_limit()
     model = YOLO(str(args.model))
 
     print(f"== {args.split}: {len(images)} images, model={args.model.name} ==")
-    metrics = model.val(data=str(args.data), split=args.split, imgsz=args.imgsz, batch=4,
+    metrics = model.val(data=str(args.data), split=args.split, imgsz=args.imgsz, batch=args.batch,
                         device=args.device, conf=0.001, iou=args.iou, plots=True,
                         project=str(args.out.resolve()), name=f"{args.split}_val", exist_ok=True)
     if args.limit:

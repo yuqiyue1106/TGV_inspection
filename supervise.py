@@ -15,6 +15,9 @@ import sys
 import time
 from pathlib import Path
 
+# device comes first on purpose: it sets PYTORCH_ENABLE_MPS_FALLBACK, which torch has to
+# see before it is imported.
+import device as dev
 import psutil
 import torch
 
@@ -37,10 +40,12 @@ BASE_CMD = [
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--run", default="official_v8s_1024", help="run directory name under code/runs")
-    p.add_argument("--device", default="auto", help="auto / 0 (CUDA) / cpu / mps")
-    p.add_argument("--batch", type=int, default=8)
-    p.add_argument("--workers", type=int, default=0)
-    p.add_argument("--cache", default="ram", choices=["ram", "disk", "false"])
+    p.add_argument("--device", default="auto", help="auto / 0 (CUDA) / mps / cpu")
+    p.add_argument("--batch", type=int, default=None,
+                   help="per-backend preset when unset: 4 on CUDA, 2 on MPS and CPU")
+    p.add_argument("--workers", type=int, default=None, help="per-backend preset when unset")
+    p.add_argument("--cache", default=None, choices=["ram", "disk", "false"],
+                   help="per-backend preset when unset: ram on CUDA, disk on a Mac")
     return p.parse_args()
 
 
@@ -194,6 +199,14 @@ def main():
     args = parse_args()
     RUN = CODE / "runs" / args.run
     LOG = CODE / "runs" / f"train_{args.run}.log"
+
+    gpu = dev.resolve(args.device)
+    prof = dev.preset(gpu)
+    for name in ("batch", "workers", "cache"):
+        if getattr(args, name) is None:
+            setattr(args, name, prof[name])
+    dev.announce(gpu)
+    log(f"preset: batch={args.batch} workers={args.workers} cache={args.cache}")
 
     last_epoch = epoch_count()
     last_beat = time.time()
