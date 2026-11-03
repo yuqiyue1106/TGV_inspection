@@ -135,7 +135,7 @@ python train.py --model runs\gpu_v8s_1024\weights\last.pt --name gpu_v8s_1024_ft
 
 ### 0.5 第三步：验证（val 阈值扫描 + test 留出集）
 
-先在 val 集上扫置信度阈值，拿到每一类推荐的 `conf`：
+先在 val 集（参与过训练的验证集）上扫置信度阈值，拿到每一类推荐的 `conf`：
 
 ```bat
 python evaluate.py --model runs\gpu_v8s_1024\weights\best.pt --device auto --out runs\eval_gpu_v8s_1024
@@ -144,7 +144,7 @@ python evaluate.py --model runs\gpu_v8s_1024\weights\best.pt --device auto --out
 产物 `runs\eval_gpu_v8s_1024\threshold_report.csv` 与 `summary.json`，后者里的
 `recommended` 给出「recall ≥ 0.95 前提下 precision 最高」的阈值，产线用哪个 `conf` 看这里。
 
-再在留出的 test 集上按口径出明细（人工标注 / 机器预标分开，另按孔径分组）：
+再在留出的 test 集（没参与训练的测试集）上按口径出明细（人工标注 / 机器预标分开，另按孔径分组）：
 
 ```bat
 python eval_test.py --model runs\gpu_v8s_1024\weights\best.pt --out runs\eval_test_gpu_v8s_1024
