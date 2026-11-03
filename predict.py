@@ -9,6 +9,8 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 
+import device as dev
+
 IMG_EXTS = {".bmp", ".png", ".jpg", ".jpeg", ".tif", ".tiff"}
 COLORS = {0: (0, 190, 0), 1: (0, 0, 255)}
 
@@ -25,7 +27,7 @@ def parse_args():
     p.add_argument("--merge-iou", type=float, default=0.5, help="NMS IoU when merging tiles")
     p.add_argument("--merge-ios", type=float, default=0.8,
                    help="intersection/min-area threshold; merges boxes cut by tile borders")
-    p.add_argument("--device", default="mps")
+    p.add_argument("--device", default="auto", help="auto / 0 (CUDA) / cpu / mps")
     p.add_argument("--tiled", action="store_true", help="slice the image into overlapping tiles")
     p.add_argument("--slice-size", type=int, default=1024)
     p.add_argument("--overlap", type=float, default=0.2)
@@ -178,6 +180,7 @@ def yolo_lines(boxes, classes, width, height):
 
 def main():
     args = parse_args()
+    args.device = dev.resolve(args.device)
     model = YOLO(str(args.model))
     names = model.names
     source = args.source

@@ -15,6 +15,8 @@ from ultralytics import YOLO
 
 from evaluate import IMG_EXTS, load_gt, match
 
+import device as dev
+
 CODE = Path(__file__).resolve().parent
 ROOT = CODE.parent
 
@@ -29,7 +31,7 @@ def parse_args():
     p.add_argument("--conf-min", type=float, default=0.05, help="lowest confidence kept for the sweep")
     p.add_argument("--iou", type=float, default=0.6, help="NMS IoU")
     p.add_argument("--match-iou", type=float, default=0.5)
-    p.add_argument("--device", default="mps")
+    p.add_argument("--device", default="auto", help="auto / 0 (CUDA) / cpu / mps")
     p.add_argument("--out", type=Path, default=CODE / "runs" / "eval_test_official")
     p.add_argument("--limit", type=int, default=0, help="debug: only score the first N images")
     return p.parse_args()
@@ -101,6 +103,8 @@ def predict_all(model, images, args, conf, chunk=8):
 
 def main():
     args = parse_args()
+    args.device = dev.resolve(args.device)
+    print(f"device: {dev.describe(args.device)}")
     args.out.mkdir(parents=True, exist_ok=True)
     images, names = split_images(args.data, args.split)
     relax_nms_time_limit()

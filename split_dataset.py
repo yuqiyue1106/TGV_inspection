@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build an Ultralytics dataset directory from images/ + labels/ using symlinks."""
+"""Build an Ultralytics dataset directory from images/ + labels/ with hard links."""
 
 import argparse
 import json
@@ -24,6 +24,11 @@ def parse_args():
                    help="held-out test split; never used for training or model selection")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--force", action="store_true", help="rebuild an existing dataset dir")
+    p.add_argument("--mode", default="auto", choices=["auto", "hardlink", "symlink", "copy"],
+                   help="hardlink needs no admin on Windows and behaves like the old symlinks; "
+                        "copy is the fallback when the split sits on another volume")
+    p.add_argument("--restratify", action="store_true",
+                   help="draw a fresh split instead of reusing the existing split.json")
     return p.parse_args()
 
 
@@ -60,30 +65,51 @@ def ensure_clean(out_dir, force):
         (label_root / split).mkdir(parents=True, exist_ok=True)
 
 
-def link(src, dst):
-    os.symlink(src.resolve(), dst)
+def link(src, dst, mode="auto"):
+    """Point dst at src. Hard links behave like the symlinks this tree used on macOS
+    (same inode, edits propagate) but need no developer-mode/admin on Windows."""
+    tries = {"hardlink": ("hardlink",), "symlink": ("symlink",), "copy": ("copy",),
+             "auto": ("hardlink", "symlink")}[mode]
+    for kind in tries:
+        try:
+            if kind == "hardlink":
+                os.link(src.resolve(), dst)
+            elif kind == "symlink":
+                os.symlink(src.resolve(), dst)
+            else:
+                shutil.copy2(src, dst)
+            return kind
+        except OSError:
+            continue
+    raise SystemExit(f"cannot link {src} -> {dst}; rerun with --mode copy")
 
 
-def main():
-    args = parse_args()
-    images = sorted(p for p in args.images_dir.iterdir() if p.suffix.lower() in IMG_EXTS)
-    samples = []
-    for img in images:
-        label = args.labels_dir / f"{img.stem}.txt"
-        if label.exists():
-            samples.append((img, label, read_label(label)))
-    if not samples:
-        raise SystemExit("no image/label pairs found")
+def load_manifest(path):
+    if not path.exists():
+        return None
+    data = json.loads(path.read_text())
+    if not all(key in data for key in ("train", "val", "test")):
+        return None
+    return data
 
-    class_ids = sorted({c for _, _, boxes in samples for c, *_ in boxes})
-    names = load_classes(args.labels_dir)
-    missing = [c for c in class_ids if c >= len(names)]
-    if missing:
-        raise SystemExit(f"class ids {missing} have no entry in {args.labels_dir / 'classes.txt'}")
-    names = names[: max(class_ids) + 1] if class_ids else names
 
-    # stratify by plate group *and* presence of every non-zero class, so each split
-    # sees the same aperture mix and the rare class stays represented everywhere
+def restore(manifest, samples):
+    by_stem = {img.stem: (img, label, boxes) for img, label, boxes in samples}
+    splits = []
+    for key in ("train", "val", "test"):
+        picked = []
+        for name in manifest[key]:
+            sample = by_stem.get(Path(name).stem)
+            if sample is None:
+                raise SystemExit(f"{key}: {name} is in the manifest but has no image/label pair")
+            picked.append(sample)
+        splits.append(picked)
+    return splits
+
+
+# stratify by plate group *and* presence of every non-zero class, so each split
+# sees the same aperture mix and the rare class stays represented everywhere
+def stratify(samples, names, args):
     def stratum(sample):
         img, _, boxes = sample
         group = img.stem.rsplit("_", 1)[0]
@@ -115,12 +141,41 @@ def main():
         train.extend(rest[n_val:])
     for items in (train, val, test):
         rng.shuffle(items)
+    return train, val, test
 
+
+def main():
+    args = parse_args()
+    images = sorted(p for p in args.images_dir.iterdir() if p.suffix.lower() in IMG_EXTS)
+    samples = []
+    for img in images:
+        label = args.labels_dir / f"{img.stem}.txt"
+        if label.exists():
+            samples.append((img, label, read_label(label)))
+    if not samples:
+        raise SystemExit("no image/label pairs found")
+
+    class_ids = sorted({c for _, _, boxes in samples for c, *_ in boxes})
+    names = load_classes(args.labels_dir)
+    missing = [c for c in class_ids if c >= len(names)]
+    if missing:
+        raise SystemExit(f"class ids {missing} have no entry in {args.labels_dir / 'classes.txt'}")
+    names = names[: max(class_ids) + 1] if class_ids else names
+
+    manifest = None if args.restratify else load_manifest(args.out_dir / "split.json")
+    if manifest:
+        train, val, test = restore(manifest, samples)
+        print(f"split reused from {args.out_dir / 'split.json'} "
+              f"(seed {manifest.get('seed')}, val_frac {manifest.get('val_frac')})")
+    else:
+        train, val, test = stratify(samples, names, args)
+
+    used_modes = set()
     ensure_clean(args.out_dir, args.force)
     for split, items in (("train", train), ("val", val), ("test", test)):
         for img, label, _ in items:
-            link(img, args.out_dir / "images" / split / img.name)
-            link(label, args.out_dir / "labels" / split / label.name)
+            used_modes.add(link(img, args.out_dir / "images" / split / img.name, args.mode))
+            used_modes.add(link(label, args.out_dir / "labels" / split / label.name, args.mode))
 
     data = {
         "path": str(args.out_dir.resolve()),
@@ -134,15 +189,14 @@ def main():
     with open(args.out_dir / "data.yaml", "w") as f:
         yaml.safe_dump(data, f, sort_keys=False, allow_unicode=True)
 
-    manifest = {
-        "seed": args.seed,
-        "val_frac": args.val_frac,
-        "test_frac": args.test_frac,
-        "train": [p.name for p, _, _ in train],
-        "val": [p.name for p, _, _ in val],
-        "test": [p.name for p, _, _ in test],
-    }
-    (args.out_dir / "split.json").write_text(json.dumps(manifest, indent=2))
+    record = dict(manifest or {})
+    record.setdefault("seed", args.seed)
+    record.setdefault("val_frac", args.val_frac)
+    record.setdefault("test_frac", args.test_frac)
+    record["train"] = [p.name for p, _, _ in train]
+    record["val"] = [p.name for p, _, _ in val]
+    record["test"] = [p.name for p, _, _ in test]
+    (args.out_dir / "split.json").write_text(json.dumps(record, indent=2))
 
     def summary(items):
         boxes = Counter(c for _, _, b in items for c, *_ in b)
@@ -151,7 +205,7 @@ def main():
         return (f"{len(items):4d} images, {dict(sorted(boxes.items()))} boxes, "
                 f"{no_scratch} without scratch, groups={dict(sorted(groups.items()))}")
 
-    print(f"dataset -> {args.out_dir}")
+    print(f"dataset -> {args.out_dir}  ({'+'.join(sorted(used_modes))})")
     print("train:", summary(train))
     print("val:  ", summary(val))
     if test:

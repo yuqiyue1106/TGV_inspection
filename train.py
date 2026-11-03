@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Train YOLOv8 on the TGV dust/scratch dataset (Apple Silicon MPS)."""
+"""Train YOLOv8 on the TGV dust/scratch dataset (CUDA, MPS or CPU)."""
 
 import argparse
 from pathlib import Path
 
 from ultralytics import YOLO
+
+import device as dev
 
 
 def parse_args():
@@ -18,8 +20,9 @@ def parse_args():
     p.add_argument("--epochs", type=int, default=200)
     p.add_argument("--batch", type=int, default=4)
     p.add_argument("--patience", type=int, default=50)
-    p.add_argument("--device", default="mps", help="mps / cpu / 0 (CUDA)")
-    p.add_argument("--workers", type=int, default=0, help="0 is the safe choice on macOS")
+    p.add_argument("--device", default="auto", help="auto / 0 (CUDA) / cpu / mps")
+    p.add_argument("--workers", type=int, default=0,
+                   help="0 keeps everything in one process, which is the safe choice when --cache ram")
     p.add_argument("--cache", default="ram", choices=["ram", "disk", "false"])
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--optimizer", default="auto",
@@ -44,21 +47,23 @@ def main():
         args.name = args.name + "_smoke"
 
     model = YOLO(args.model)
+    gpu = dev.resolve(args.device)
     if args.tensorboard:
         from ultralytics.utils import SETTINGS
         previous = SETTINGS["tensorboard"]
         SETTINGS.update({"tensorboard": True})
+    print(f"device: {dev.describe(gpu)}")
     model.train(
         data=str(args.data),
         imgsz=args.imgsz,
         epochs=args.epochs,
         batch=args.batch,
-        device=args.device,
+        device=gpu,
         workers=args.workers,
         cache=False if args.cache == "false" else args.cache,
         patience=args.patience,
         seed=args.seed,
-        amp=args.device != "mps",  # AMP is not supported on MPS
+        amp=dev.amp_enabled(gpu),
         project=str(args.project),
         name=args.name,
         exist_ok=True,

@@ -14,10 +14,10 @@ Then: python -m tensorboard.main --logdir runs/tb_logs --port 6006
 
 import argparse
 import json
-import os
 import time
 from pathlib import Path
 
+import psutil
 from torch.utils.tensorboard import SummaryWriter
 
 from export_metrics import RUNS_DIR, read_run
@@ -33,13 +33,9 @@ TB_ROOT = RUNS_DIR / "tb_logs"
 
 
 def is_alive(pid):
-    try:
-        os.kill(pid, 0)
-    except (ProcessLookupError, ValueError):
-        return False
-    except PermissionError:
-        return True
-    return True
+    # os.kill(pid, 0) is the unix liveness probe, but on Windows it maps to
+    # TerminateProcess and kills the trainer instead of checking on it.
+    return psutil.pid_exists(pid)
 
 
 def sync_run(run, writer):

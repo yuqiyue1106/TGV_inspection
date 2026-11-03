@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
-"""Guard the official training run: restart on death, evaluate when it finishes."""
+"""Guard a training run: restart on death, evaluate when it finishes.
 
+Start the run once with train.py, then hand it to this. Process discovery,
+detaching and killing go through psutil so the same script works on Windows
+(where pgrep/pmset do not exist) and on macOS/Linux.
+"""
+
+import argparse
 import csv
+import os
 import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
 
+import psutil
 import torch
 
 CODE = Path(__file__).resolve().parent
@@ -21,24 +29,51 @@ HEARTBEAT_MINUTES = 10
 BASE_CMD = [
     sys.executable, str(CODE / "train.py"),
     "--resume", "--tensorboard",
-    "--project", str(CODE / "runs"), "--name", RUN.name,
-    "--batch", "8", "--imgsz", "1024", "--patience", "30",
-    "--close-mosaic", "10", "--workers", "0", "--cache", "ram", "--device", "mps",
+    "--imgsz", "1024", "--patience", "30",
+    "--close-mosaic", "10",
 ]
+
+
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--run", default="official_v8s_1024", help="run directory name under code/runs")
+    p.add_argument("--device", default="auto", help="auto / 0 (CUDA) / cpu / mps")
+    p.add_argument("--batch", type=int, default=8)
+    p.add_argument("--workers", type=int, default=0)
+    p.add_argument("--cache", default="ram", choices=["ram", "disk", "false"])
+    return p.parse_args()
+
+
+def command(args):
+    return BASE_CMD + ["--project", str(CODE / "runs"), "--name", args.run,
+                       "--batch", str(args.batch), "--workers", str(args.workers),
+                       "--cache", args.cache, "--device", args.device]
 
 
 def log(msg):
     print(time.strftime("%Y-%m-%d %H:%M:%S"), msg, flush=True)
 
 
+def matching_pids(needle):
+    """Pids whose command line contains needle, excluding this supervisor."""
+    pids = []
+    for proc in psutil.process_iter(["pid", "cmdline"]):
+        try:
+            cmdline = " ".join(proc.info["cmdline"] or [])
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+        if needle in cmdline and proc.info["pid"] != os.getpid():
+            pids.append(proc.info["pid"])
+    return pids
+
+
 def trainer_pids():
-    out = subprocess.run(["pgrep", "-f", "train[.]py"], capture_output=True, text=True)
-    return [p for p in out.stdout.split() if p]
+    return matching_pids("train.py")
 
 
 def tensorboard_pids():
-    out = subprocess.run(["pgrep", "-f", "tensorboard[.]main"], capture_output=True, text=True)
-    return [p for p in out.stdout.split() if p]
+    # "tensorboard" alone also matches the trainer's --tensorboard flag, so pin to the module.
+    return matching_pids("tensorboard.main")
 
 
 def epoch_count():
@@ -95,26 +130,33 @@ def pick_checkpoint():
     return None
 
 
-def launch(checkpoint):
-    cmd = BASE_CMD[:2] + ["--model", str(checkpoint)] + BASE_CMD[2:]
-    with open(LOG, "a", buffering=1) as out:
-        return subprocess.Popen(cmd, cwd=CODE, stdin=subprocess.DEVNULL,
-                                stdout=out, stderr=subprocess.STDOUT, start_new_session=True)
+def spawn(cmd, log_path):
+    with open(log_path, "a", buffering=1) as out:
+        kwargs = dict(cwd=str(CODE), stdin=subprocess.DEVNULL, stdout=out,
+                      stderr=subprocess.STDOUT)
+        if os.name == "nt":
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+        else:
+            kwargs["start_new_session"] = True
+        return subprocess.Popen(cmd, **kwargs)
 
 
-def start_tensorboard():
-    with open(CODE / "runs" / "tensorboard.log", "a", buffering=1) as out:
-        return subprocess.Popen(
-            [sys.executable, "-m", "tensorboard.main", "--logdir", str(CODE / "runs"),
-             "--host", "127.0.0.1", "--port", "6006", "--reload_interval", "30"],
-            cwd=CODE, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
-            start_new_session=True)
+def launch(args, checkpoint):
+    cmd = command(args)
+    cmd[2:2] = ["--model", str(checkpoint)]
+    return spawn(cmd, LOG)
+
+
+def start_tensorboard(args):
+    return spawn([sys.executable, "-m", "tensorboard.main", "--logdir", str(CODE / "runs"),
+                  "--host", "127.0.0.1", "--port", "6006", "--reload_interval", "30"],
+                 CODE / "runs" / "tensorboard.log")
 
 
 def run_step(name, cmd, attempts=2):
     for attempt in range(1, attempts + 1):
         log(f"run {name} (attempt {attempt})")
-        result = subprocess.run(cmd, cwd=CODE)
+        result = subprocess.run(cmd, cwd=str(CODE))
         if result.returncode == 0:
             return True
         log(f"{name} exited {result.returncode}")
@@ -122,32 +164,42 @@ def run_step(name, cmd, attempts=2):
     return False
 
 
-def evaluate():
+def evaluate(args):
     best = RUN / "weights" / "best.pt"
     if not best.exists():
         log(f"no {best}, cannot evaluate")
         return
     run_step("eval_test", [sys.executable, str(CODE / "eval_test.py"), "--model", str(best),
-                           "--out", str(CODE / "runs" / "eval_test_official")])
-    run_step("report", [sys.executable, str(CODE / "report.py")])
+                           "--device", args.device,
+                           "--out", str(CODE / "runs" / f"eval_test_{args.run}")])
+    run_step("report", [sys.executable, str(CODE / "report.py"), "--run", str(RUN),
+                        "--eval", str(CODE / "runs" / f"eval_test_{args.run}" / "summary.json")])
     run_step("export_metrics", [sys.executable, str(CODE / "export_metrics.py")])
-    log("results -> runs/eval_test_official/summary.json, runs/official_v8s_1024/report/report.md")
+    log(f"results -> runs/eval_test_{args.run}/summary.json, runs/{args.run}/report/report.md")
 
 
 def environment_warnings():
-    batt = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True).stdout
-    if "Battery Power" in batt:
-        log("WARNING running on battery; sleep/undervoltage will kill the run")
+    battery = psutil.sensors_battery()
+    if battery and not battery.power_plugged:
+        log(f"WARNING running on battery ({battery.percent:.0f}% left); sleep will kill the run")
+    if os.name == "nt" and battery is not None:
+        log("hint: keep the machine awake with `powercfg /change standby-timeout-ac 0`")
     free_gb = shutil.disk_usage(CODE).free / 1e9
     if free_gb < 5:
         log(f"WARNING only {free_gb:.1f} GB disk free")
 
 
 def main():
+    global RUN, LOG
+    args = parse_args()
+    RUN = CODE / "runs" / args.run
+    LOG = CODE / "runs" / f"train_{args.run}.log"
+
     last_epoch = epoch_count()
     last_beat = time.time()
     restarts = stalled = 0
-    log(f"supervisor start: pids={trainer_pids()} epochs={last_epoch}")
+    log(f"supervisor start: run={args.run} device={args.device} "
+        f"pids={trainer_pids()} epochs={last_epoch}")
     environment_warnings()
 
     while True:
@@ -159,14 +211,15 @@ def main():
         if not pids:
             checkpoint = pick_checkpoint()
             if checkpoint is None:
-                log("no usable checkpoint, cannot resume")
+                log(f"no usable checkpoint under {RUN / 'weights'}, cannot resume; "
+                    f"start the run with train.py first")
                 return 1
             restarts += 1
             if restarts > MAX_RESTARTS:
                 log(f"giving up after {restarts} restarts")
                 return 1
             log(f"trainer gone, restart #{restarts} from {checkpoint.name} at epoch {epoch_count()}")
-            launch(checkpoint)
+            launch(args, checkpoint)
             time.sleep(90)
             continue
 
@@ -182,7 +235,7 @@ def main():
 
         if not tensorboard_pids():
             log("tensorboard gone, restarting")
-            start_tensorboard()
+            start_tensorboard(args)
 
         if LOG.exists():
             idle = (time.time() - LOG.stat().st_mtime) / 60
@@ -191,13 +244,17 @@ def main():
                 log(f"no log output for {idle:.0f} min (check {stalled}/2)")
                 if stalled >= 2:
                     log(f"killing stalled trainer {pids}")
-                    subprocess.run(["kill", "-9", *pids])
+                    for pid in pids:
+                        try:
+                            psutil.Process(pid).kill()
+                        except psutil.NoSuchProcess:
+                            pass
                     stalled = 0
                     time.sleep(10)
                     continue
         time.sleep(CHECK_SECONDS)
 
-    evaluate()
+    evaluate(args)
     log("supervisor exit")
     return 0
 
