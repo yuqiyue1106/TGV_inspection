@@ -63,13 +63,77 @@ python train.py --name gpu_v8s_1024 --epochs 100 --batch 4 --imgsz 1024 --worker
 产物：`runs\gpu_v8s_1024\weights\best.pt`、`last.pt`、`results.csv`、曲线图和
 TensorBoard 事件。
 
-训练中途断了、或想补 epoch，用 `last.pt` 续训（不会重头开始）：
+训练中断了要接着跑、和训练跑完了想再多训几十个 epoch，是两件不同的事，命令和效果都不同，
+见 §0.4。
+
+### 0.4 续训与加练：`--resume` 还是从 `last.pt` 新开一段
+
+先按情况选：
+
+| 你的情况 | 用哪种 | 结果 |
+|---|---|---|
+| 进程崩了 / 被关了，原计划仍是 100 epoch | **A. `--resume` 断点续训** | 从断点 epoch 接着跑到 100 |
+| 100 epoch 已正常跑完，想再补 50 epoch | **B. 从 `last.pt` 新开一段** | 在已有权重上重新走 50 epoch 的调度 |
+| 不想动原 run 的任何记录 | **B. 从 `last.pt` 新开一段** | 写到新目录，原 run 不受影响 |
+
+#### 方法 A：`--resume` 断点续训（只接断点，不能加 epoch）
 
 ```bat
 python train.py --model runs\gpu_v8s_1024\weights\last.pt --name gpu_v8s_1024 --resume
 ```
 
-### 0.4 第三步：验证（val 阈值扫描 + test 留出集）
+- 恢复的不只是权重，还有 `train_args`（`epochs`、`lr0`、优化器、`patience`、`name`、
+  `save_dir`、数据路径）、优化器状态、EMA、`best_fitness` 和当前 epoch。
+- **epoch 总数不能改。** `epochs` 不在允许覆盖的白名单里（白名单只有 `imgsz`、`batch`、
+  `device`、`workers`、`cache`、`patience`、`close_mosaic`、`save_period`、`time`、`freeze`、
+  `val`、`plots` 等），传 `--epochs 150` 会被忽略，日志打印
+  `Resume ignores ['epochs'], using checkpoint values`。`--name`、`--lr0`、`--optimizer`、
+  增强参数同样改不了。
+- 该 run 已经跑满 100 时，续训会在 `assert 0 < start_epoch < self.epochs` 处直接失败。
+- 产物写回**原 run 目录**，`results.csv` 是**追加**（`resume=True` 时 ultralytics 不删旧文件），
+  曲线接着原来的往后画。
+
+#### 方法 B：从 `last.pt` 新开一段（延长训练 / 加练）
+
+```bat
+python train.py --model runs\gpu_v8s_1024\weights\last.pt --name gpu_v8s_1024_ft50 --epochs 50 --batch 4 --imgsz 1024 --workers 8 --cache false --patience 30 --tensorboard
+```
+
+- **不带 `--resume`**，`--epochs N` 就是这一段实际要跑的 epoch 数；想加 50 就写 50。
+- 只加载权重，**不加载**优化器状态和学习率进度：epoch 从 1 重新计数，重新 warmup，
+  按新的 50 epoch 重新走余弦衰减。本质是「接着已有权重做微调」，不是严格连续的第 101–150 轮。
+- 超参数全部可改。想更稳可加 `--optimizer AdamW --lr0 0.001` 走低学习率；注意
+  `optimizer=auto` 时 `lr0` 不生效（见 `train.py:44-46`）。
+- **必须换新名字。** `runs\<name>` 已存在时 `train.py` 走 `exist_ok=True`，ultralytics 会
+  **删掉该目录下旧的 `results.csv`** 并覆盖 `weights/` 与曲线；用 `gpu_v8s_1024_ft50` 这类
+  新名字，原 run 才不会被破坏。
+- 起训权重用 `last.pt`（最后一轮）或 `best.pt`（验证集最优）都行；加练更推荐 `best.pt`，
+  避免从可能已经过拟合的末轮接着练。
+
+#### 两者的区别
+
+| 维度 | A. `--resume` 断点续训 | B. 从 `last.pt` 新开一段 |
+|---|---|---|
+| 适用场景 | 进程中断，原计划 epoch 不变 | 原计划已跑完，要增加 epoch |
+| 总 epoch | 固定为 checkpoint 里的原值（如 100） | 由 `--epochs` 决定（如 50） |
+| epoch 计数 | 从断点 epoch+1 接着数 | 从 1 重新数 |
+| 优化器 / 学习率 | 恢复优化器状态，lr 接着原曲线 | 重新初始化，重新 warmup、重走衰减 |
+| 能改的超参 | 仅白名单内的几项 | 几乎全部 |
+| 写入目录 | 原 run（`save_dir` 取自 checkpoint） | `--name` 指定的新目录 |
+| `results.csv` | 追加，曲线连续 | 新文件，从 0 开始 |
+| 原 run 数据 | 被继续写入 | 完全不动 |
+| run 已跑满时 | 直接报错 | 正常工作 |
+| 最终选模型 | 仍看原 run 的 `best.pt` | 两段的 `best.pt` 要分别评估后比较 |
+
+#### 注意
+
+- **不要和正在跑的训练并发。** 两个进程写同一个 run 会互相覆盖，batch 4 也已占约 2/3 显存。
+- 加练那一段的 `best.pt` 只代表「新 50 epoch 内最好」，不等于整体最好。选型时把两段的
+  `best.pt` 分别用 §0.5 的 `evaluate.py` / `eval_test.py` 跑一遍再比。
+- `report.py` 按 `results.csv` 的 `time` 列算累计时长，断点续训时 `time` 会归零，脚本已按
+  「分段求和」处理；新开一段是独立目录，各自出报告即可。
+
+### 0.5 第三步：验证（val 阈值扫描 + test 留出集）
 
 先在 val 集上扫置信度阈值，拿到每一类推荐的 `conf`：
 
@@ -89,7 +153,7 @@ python eval_test.py --model runs\gpu_v8s_1024\weights\best.pt --out runs\eval_te
 产物 `runs\eval_test_gpu_v8s_1024\summary.json`（含官方 mAP50 / mAP50-95）、
 `breakdown.csv`、`sweep.csv`。
 
-### 0.5 第四步：汇总成 Markdown 报告
+### 0.6 第四步：汇总成 Markdown 报告
 
 ```bat
 python report.py --run runs\gpu_v8s_1024 --eval runs\eval_test_gpu_v8s_1024\summary.json
@@ -113,7 +177,7 @@ python report.py --run runs\gpu_v8s_1024 --eval runs\eval_test_gpu_v8s_1024\summ
 python report.py --run runs\official_v8s_1024 --eval runs\eval_test_official\summary.json
 ```
 
-### 0.6 第五步（可选）：跑图 / 预标注
+### 0.7 第五步（可选）：跑图 / 预标注
 
 ```bat
 python predict.py --model runs\gpu_v8s_1024\weights\best.pt --source ..\images --tiled
@@ -122,7 +186,7 @@ python predict.py --model runs\gpu_v8s_1024\weights\best.pt --source ..\images -
 全分辨率图必须带 `--tiled`（默认 1024 切片、20% 重叠）。带标注的预览图和每图 `.txt`
 写到 `runs\predict\`；要给 LabelImg 预标注，加 `--labels-out ..\labels --skip-existing`。
 
-### 0.7 验收清单
+### 0.8 验收清单
 
 | 检查项 | 期望结果 |
 |---|---|
