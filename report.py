@@ -249,7 +249,7 @@ def main():
         f"- 曲线：`{OUT.name}/curves_metrics.png`、`curves_losses.png`、`test_breakdown.png`",
     ]
     report = OUT / "report.md"
-    report.write_text("\n".join(lines) + "\n")
+    report.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"best epoch {int(best['epoch'])}: mAP50={best['metrics/mAP50(B)']:.4f} "
           f"mAP50-95={best['metrics/mAP50-95(B)']:.4f}")
     if eval_data:
