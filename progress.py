@@ -5,11 +5,12 @@ import argparse
 import csv
 import re
 import statistics
+import time
 from pathlib import Path
 
 import yaml
 
-EPOCH_LINE = re.compile(r"^\s*(\d+)/(\d+)\s+[\d.]+G\s+.*?(\d+)%\s.*?(\d+)/(\d+)\s+([\d.]+)s/it.*?<(\S+)$")
+EPOCH_LINE = re.compile(r"^\s*(\d+)/(\d+)\s+[\d.]+G\s+.*?(\d+)%\s.*?(\d+)/(\d+)\s+([\d.]+)(?:s/it|it/s).*?<(\S+)$")
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
@@ -21,6 +22,9 @@ def parse_args():
     p.add_argument("--log", type=Path, default=None,
                    help="training log; defaults to runs/train_<run>.log when present")
     p.add_argument("--last", type=int, default=10, help="how many recent epochs to print")
+    p.add_argument("--watch", nargs="?", const=30.0, type=float, default=0.0,
+                   help="refresh every N seconds until the run ends (default 30 when the "
+                        "value is omitted, 0 prints once)")
     return p.parse_args()
 
 
@@ -66,20 +70,17 @@ def training_finished(log_path):
     return "best checkpoint:" in log_path.read_text(errors="ignore")[-4000:]
 
 
-def main():
-    args = parse_args()
-    code_dir = Path(__file__).resolve().parent
-    args.run = resolve_run(code_dir, args.run)
-    if args.log is None:
-        candidate = args.run.parent / f"train_{args.run.name}.log"
-        args.log = candidate if candidate.exists() else None
+def report(args):
+    """Print one snapshot of the run; return True when training has finished."""
     csv_path = args.run / "results.csv"
     if not csv_path.exists():
-        raise SystemExit(f"{csv_path} not found (training not started yet)")
+        print(f"{args.run.name}: {csv_path} 不存在（训练还没开始）")
+        return False
 
     rows = list(csv.DictReader(open(csv_path)))
     if not rows:
-        raise SystemExit("no epochs recorded yet")
+        print(f"{args.run.name}: 还没有完成任何 epoch")
+        return False
 
     total = 100
     args_yaml = args.run / "args.yaml"
@@ -88,7 +89,6 @@ def main():
 
     key = lambda r, name: float(r[name])
     done = len(rows)
-    last = rows[-1]
     times = [key(r, "time") for r in rows]
 
     # cumulative time restarts after a resume, so sum the monotonic segments
@@ -133,6 +133,27 @@ def main():
     if finished:
         ckpt = args.run / "weights" / "best.pt"
         print(f"best checkpoint: {ckpt}" + ("" if ckpt.exists() else "  (缺失!)"))
+    return finished
+
+
+def main():
+    args = parse_args()
+    code_dir = Path(__file__).resolve().parent
+    args.run = resolve_run(code_dir, args.run)
+    if args.log is None:
+        args.log = args.run.parent / f"train_{args.run.name}.log"
+
+    while True:
+        if args.watch:
+            print(f"\n[{time.strftime('%H:%M:%S')}] {args.run.name}")
+        finished = report(args)
+        if finished or not args.watch:
+            break
+        try:
+            time.sleep(args.watch)
+        except KeyboardInterrupt:
+            print("\n已停止刷新（训练进程不受影响）")
+            break
 
 
 if __name__ == "__main__":
