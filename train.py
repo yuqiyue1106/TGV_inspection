@@ -46,6 +46,29 @@ def parse_args():
     p.add_argument("--lr0", type=float, default=0.01, help="initial LR (only used when --optimizer != auto)")
     p.add_argument("--warmup-epochs", type=float, default=3.0)
     p.add_argument("--close-mosaic", type=int, default=10)
+    p.add_argument("--cos-lr", action="store_true",
+                   help="cosine LR schedule instead of the default linear decay")
+    p.add_argument("--lrf", type=float, default=None,
+                   help="final LR as a fraction of lr0 (ultralytics default: 0.01)")
+    p.add_argument("--weight-decay", type=float, default=None,
+                   help="optimizer weight decay (ultralytics default: 0.0005)")
+    p.add_argument("--cls-pw", type=float, default=0.0,
+                   help="inverse-frequency class weight power, 0 disables it; "
+                        "0.5 raises the weight of the rarer class by about 1.5x here")
+    p.add_argument("--box-gain", type=float, default=None, help="box loss gain (default 7.5)")
+    p.add_argument("--cls-gain", type=float, default=None, help="cls loss gain (default 0.5)")
+    p.add_argument("--dfl-gain", type=float, default=None, help="dfl loss gain (default 1.5)")
+    p.add_argument("--degrees", type=float, default=None, help="rotation range (default 10)")
+    p.add_argument("--translate", type=float, default=None, help="translation range (default 0.1)")
+    p.add_argument("--scale", type=float, default=None, help="scale jitter (default 0.5)")
+    p.add_argument("--mosaic", type=float, default=None, help="mosaic probability (default 1.0)")
+    p.add_argument("--mixup", type=float, default=None, help="mixup probability (default 0.0)")
+    p.add_argument("--cutmix", type=float, default=None, help="cutmix probability (default 0.0)")
+    p.add_argument("--hsv-h", type=float, default=None, help="hue jitter (default 0.015)")
+    p.add_argument("--hsv-s", type=float, default=None, help="saturation jitter (default 0.7)")
+    p.add_argument("--hsv-v", type=float, default=None, help="value jitter (default 0.4)")
+    p.add_argument("--multi-scale", type=float, default=None,
+                   help="multi-scale training range as a fraction of imgsz (0 disables)")
     p.add_argument("--tensorboard", action="store_true",
                    help="write TensorBoard events into the run directory")
     p.add_argument("--project", type=Path, default=code_dir / "runs")
@@ -82,6 +105,19 @@ def main():
     dev.announce(gpu)
     print(f"preset: batch={args.batch} workers={args.workers} cache={args.cache} "
           f"amp={dev.amp_enabled(gpu)}")
+
+    # Only forward what the caller changed, so the defaults stay ultralytics' own.
+    extra = {}
+    for key, value in (
+        ("box", args.box_gain), ("cls", args.cls_gain), ("dfl", args.dfl_gain),
+        ("lrf", args.lrf), ("weight_decay", args.weight_decay),
+        ("multi_scale", args.multi_scale), ("mixup", args.mixup), ("cutmix", args.cutmix),
+    ):
+        if value is not None:
+            extra[key] = value
+    if args.cos_lr:
+        extra["cos_lr"] = True
+
     model.train(
         data=str(args.data),
         imgsz=args.imgsz,
@@ -99,16 +135,22 @@ def main():
         plots=True,
         val=True,
         # augmentation: scratch orientation is arbitrary, keep mosaic on by default
-        degrees=10,
+        degrees=10 if args.degrees is None else args.degrees,
+        translate=0.1 if args.translate is None else args.translate,
+        scale=0.5 if args.scale is None else args.scale,
+        mosaic=1.0 if args.mosaic is None else args.mosaic,
+        hsv_h=0.015 if args.hsv_h is None else args.hsv_h,
+        hsv_s=0.7 if args.hsv_s is None else args.hsv_s,
+        hsv_v=0.4 if args.hsv_v is None else args.hsv_v,
         fliplr=0.5,
         flipud=0.5,
-        scale=0.5,
-        mosaic=1.0,
         close_mosaic=args.close_mosaic,
         optimizer=args.optimizer,
         lr0=args.lr0,
         warmup_epochs=args.warmup_epochs,
+        cls_pw=args.cls_pw,
         resume=args.resume,
+        **extra,
     )
     if args.tensorboard:
         SETTINGS.update({"tensorboard": previous})
