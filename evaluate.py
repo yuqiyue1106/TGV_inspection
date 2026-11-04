@@ -20,7 +20,7 @@ def parse_args():
     code_dir = Path(__file__).resolve().parent
     root = code_dir.parent
     p = argparse.ArgumentParser()
-    p.add_argument("--model", type=Path, default=root / "code" / "runs" / "tgv_v8s_1024" / "weights" / "best.pt")
+    p.add_argument("--model", type=Path, default=root / "code" / "runs" / "gpu_v8s_1024" / "weights" / "best.pt")
     p.add_argument("--data", type=Path, default=root / "dataset" / "data.yaml")
     p.add_argument("--imgsz", type=int, default=1024)
     p.add_argument("--batch", type=int, default=None,

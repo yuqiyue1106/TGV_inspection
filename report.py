@@ -140,6 +140,14 @@ def markdown_table(rows, columns):
     return head + body
 
 
+def _rel(path):
+    """Short label for the report: relative to runs/ when possible, absolute otherwise."""
+    try:
+        return path.resolve().relative_to(CODE / "runs").as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
 def main():
     global RUN, EVAL, OUT
     args = parse_args()
@@ -245,7 +253,10 @@ def main():
         "## 5. 产物",
         "",
         f"- 指标明细：`{RUN.name}/results.csv`",
-        f"- 评测明细：`runs/eval_test_official/breakdown.csv`、`sweep.csv`、`summary.json`",
+    ]
+    if eval_data:
+        lines.append(f"- 评测明细：`{_rel(EVAL.parent)}/breakdown.csv`、`sweep.csv`、`summary.json`")
+    lines += [
         f"- 曲线：`{OUT.name}/curves_metrics.png`、`curves_losses.png`、`test_breakdown.png`",
     ]
     report = OUT / "report.md"

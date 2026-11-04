@@ -20,7 +20,7 @@ def parse_args():
     code_dir = Path(__file__).resolve().parent
     root = code_dir.parent
     p = argparse.ArgumentParser()
-    p.add_argument("--model", type=Path, default=code_dir / "runs" / "tgv_v8s_1024" / "weights" / "best.pt")
+    p.add_argument("--model", type=Path, default=code_dir / "runs" / "gpu_v8s_1024" / "weights" / "best.pt")
     p.add_argument("--source", type=Path, required=True, help="image file or directory")
     p.add_argument("--imgsz", type=int, default=1024)
     p.add_argument("--conf", type=float, default=0.25)

@@ -63,6 +63,8 @@ python train.py --name gpu_v8s_1024 --epochs 100 --batch 4 --imgsz 1024 --worker
 产物：`runs\gpu_v8s_1024\weights\best.pt`、`last.pt`、`results.csv`、曲线图和
 TensorBoard 事件。
 
+上面这条命令用的是默认的 V8s。要换成 YOLO11 / YOLO26，见 §5.1（换模型就是换 `--model`）。
+
 训练中断了要接着跑、和训练跑完了想再多训几十个 epoch，是两件不同的事，命令和效果都不同，
 见 §0.4。
 
@@ -313,6 +315,73 @@ python export_metrics.py
 python tb_bridge.py --all
 python export.py --format onnx          # Mac 上不要 --format engine，也不要 --half
 ```
+
+### 5.1 换模型版本（YOLOv8 / YOLO11 / YOLO26）
+
+**没有版本开关，换模型就是换 `--model` 指向的权重文件。** 代码里没有任何
+`if v8 / if v11` 分支，`train.py` 也不知道自己训的是哪一代。
+
+原理：`.pt` 文件内部自带一份 `model.yaml`，记录着网络结构。`YOLO(path)` 先照这份 yaml
+把骨架搭出来，再把权重灌进去。所以**架构由权重文件决定，不由代码决定**：
+
+| `--model` 传什么 | 会发生什么 |
+|---|---|
+| `runs\<run>\weights\best.pt`（本项目训出来的） | 按 checkpoint 内嵌结构重建 → 加载你的权重 |
+| `weights/yolov8s.pt`（官方预训练） | 官方 V8s，结构同样内嵌在文件里 |
+| `weights/yolo11s.pt` | 官方 YOLO11s |
+| `yolov8s.yaml` / `yolo11s.yaml` | 只有结构、随机初始化，从头训 |
+
+本机 `weights\` 现有 `yolov8n.pt`、`yolov8s.pt`、`yolo11s.pt`、`yolo26n.pt`。缺的模型
+（如 `yolo26s.pt`）在第一次 `YOLO(...)` 时由 ultralytics 自动下载。该目录被 Git 忽略，
+换机器后为空也能跑，只是会多一次下载。
+
+#### 各版本的起始命令
+
+```bat
+:: V8s —— 默认就是它，不传 --model 即走 weights\yolov8s.pt
+python train.py --name gpu_v8s_1024 --epochs 100 --batch 4 --imgsz 1024 --workers 8 --cache false --patience 30 --tensorboard
+
+:: 换版本时照抄这一行，只改 --model / --name / --imgsz / --batch
+python train.py --model weights\yolov8s.pt --name gpu_v8s_1024 --epochs 100 --batch 4 --imgsz 1024 --workers 8 --cache false --patience 30 --tensorboard
+
+:: YOLO11s —— 本机 1280 实测：100 epoch / 3.81 h / 显存峰值约 3.6 GB
+python train.py --model weights\yolo11s.pt --name gpu_y11s_1280 --epochs 100 --batch 2 --imgsz 1280 --workers 8 --cache false --patience 25 --tensorboard
+
+:: YOLO26s —— 8.4.184 支持 n/s/m/l/x，首次运行自动下载
+python train.py --model yolo26s.pt --name gpu_y26s_1280 --epochs 100 --batch 2 --imgsz 1280 --workers 8 --cache false --patience 25 --tensorboard
+```
+
+换版本时必须一起改的有三件事：
+
+1. **`--name` 必须换新名字。** `runs\<name>` 已存在时 `train.py` 走 `exist_ok=True`，
+   ultralytics 会删掉旧的 `results.csv` 并覆盖 `weights\` 与曲线——跨版本复用同一个名字
+   等于把原 run 的记录毁掉。
+2. **`--imgsz` 训练与推理必须同档。** 实测代价：1024 训的 V8s 拿 1280 推理，mAP50-95 从
+   0.4357 掉到 0.4116（−0.024）；1280 训的 YOLO11s 拿 1024 推理，从 0.4307 掉到 0.4157
+   （−0.015），且先丢的是细划痕。`evaluate.py` / `eval_test.py` / `predict.py` / `export.py`
+   的 `--imgsz` 都是独立参数，**不会**自动跟随 checkpoint。
+3. **`--batch` 按分辨率给。** 1024 用 4（6 GB 卡峰值 4094 MiB），1280 用 2（峰值约 3.6 GB）。
+
+评估、推理、导出**不需要任何版本参数**，只给 `.pt` 路径（分辨率仍要自己带上）：
+
+```bat
+python evaluate.py --model runs\gpu_v8s_1024\weights\best.pt --imgsz 1024
+python eval_test.py --model runs\gpu_v8s_1024\weights\best.pt --imgsz 1024
+python predict.py  --model runs\gpu_v8s_1024\weights\best.pt --source ..\images\TGV_60 --tiled
+python export.py   --model runs\gpu_v8s_1024\weights\best.pt --format onnx
+```
+
+#### 不要做的事
+
+- **不要改 checkpoint 的文件名或 yaml 来“换版本”。** 架构和权重的键名是绑死的，
+  V8s 的权重灌进 YOLO11 的骨架会直接报 state_dict 不匹配。换版本只能拿对应的官方
+  `.pt` / `.yaml` 重新训。
+- **不要只换 `--model` 而沿用旧的 `--name`**（原因见上面第 1 条）。
+- **不要拿两个版本的绝对值直接下结论。** 本仓库唯一的跨版本对照（V8s@1024 vs
+  YOLO11s@1280）是 mAP50-95 0.4357 对 0.4307，差 0.005，在 176 张测试图上属于噪声；
+  真正的差异只有假框数量（同分辨率下 YOLO11s 少 12–28%，取决于类别与分辨率），代价是
+  训练 1.8×、推理算力 1.56×。
+  换版本前先按 §0.2 冒烟，再按 §0.5 评估，别只看训练日志里的 mAP。
 
 ---
 

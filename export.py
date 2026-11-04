@@ -20,7 +20,7 @@ from ultralytics import YOLO
 def parse_args():
     code_dir = Path(__file__).resolve().parent
     p = argparse.ArgumentParser()
-    p.add_argument("--model", type=Path, default=code_dir / "runs" / "tgv_v8s_1024" / "weights" / "best.pt")
+    p.add_argument("--model", type=Path, default=code_dir / "runs" / "gpu_v8s_1024" / "weights" / "best.pt")
     p.add_argument("--format", default="onnx", choices=["onnx", "coreml", "engine", "torchscript"])
     p.add_argument("--imgsz", type=int, default=1024)
     p.add_argument("--opset", type=int, default=12)
